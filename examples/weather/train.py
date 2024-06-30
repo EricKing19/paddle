@@ -19,22 +19,9 @@ import numpy as np
 import paddle.distributed as dist
 from omegaconf import DictConfig
 
-import examples.fourcastnet.utils as fourcast_utils
+import examples.weather.utils as utils
 import ppsci
 from ppsci.utils import logger
-
-
-def get_data_stat(cfg: DictConfig):
-    data_mean, data_std = fourcast_utils.get_mean_std(
-        cfg.DATA_MEAN_PATH, cfg.DATA_STD_PATH, cfg.VARS_CHANNEL
-    )
-    data_time_mean = fourcast_utils.get_time_mean(
-        cfg.DATA_TIME_MEAN_PATH, cfg.IMG_H, cfg.IMG_W, cfg.VARS_CHANNEL
-    )
-    data_time_mean_normalize = np.expand_dims(
-        (data_time_mean[0] - data_mean) / data_std, 0
-    )
-    return data_mean, data_std, data_time_mean_normalize
 
 
 def train(cfg: DictConfig):
@@ -43,10 +30,10 @@ def train(cfg: DictConfig):
     # initialize logger
     logger.init_logger("ppsci", osp.join(cfg.output_dir, "train.log"), "info")
 
-    data_mean, data_std = fourcast_utils.get_mean_std(
+    data_mean, data_std = utils.get_mean_std(
         cfg.DATA_MEAN_PATH, cfg.DATA_STD_PATH, cfg.VARS_CHANNEL
     )
-    data_time_mean = fourcast_utils.get_time_mean(
+    data_time_mean = utils.get_time_mean(
         cfg.DATA_TIME_MEAN_PATH, cfg.IMG_H, cfg.IMG_W, cfg.VARS_CHANNEL
     )
     data_time_mean_normalize = np.expand_dims(
@@ -63,7 +50,7 @@ def train(cfg: DictConfig):
     if not cfg.USE_SAMPLED_DATA:
         train_dataloader_cfg = {
             "dataset": {
-                "name": "ERA5SQDataset",
+                "name": "ERA5Dataset",
                 "file_path": cfg.TRAIN_FILE_PATH,
                 "input_keys": cfg.MODEL.afno.input_keys,
                 "label_keys": cfg.MODEL.afno.output_keys,
@@ -100,7 +87,7 @@ def train(cfg: DictConfig):
     # set constraint
     sup_constraint = ppsci.constraint.SupervisedConstraint(
         train_dataloader_cfg,
-        ppsci.loss.L2RelLoss(),
+        ppsci.loss.MSELoss(),
         name="Sup",
     )
     constraint = {sup_constraint.name: sup_constraint}
@@ -111,7 +98,7 @@ def train(cfg: DictConfig):
     # set eval dataloader config
     eval_dataloader_cfg = {
         "dataset": {
-            "name": "ERA5SQDataset",
+            "name": "ERA5Dataset",
             "file_path": cfg.VALID_FILE_PATH,
             "input_keys": cfg.MODEL.afno.input_keys,
             "label_keys": cfg.MODEL.afno.output_keys,
@@ -130,28 +117,28 @@ def train(cfg: DictConfig):
     # set validator
     sup_validator = ppsci.validate.SupervisedValidator(
         eval_dataloader_cfg,
-        ppsci.loss.L2RelLoss(),
+        ppsci.loss.MSELoss(),
         metric={
             "MAE": ppsci.metric.MAE(keep_batch=True),
-            "LatitudeWeightedRMSE": ppsci.metric.LatitudeWeightedRMSE(
-                num_lat=cfg.IMG_H,
-                std=data_std,
-                keep_batch=True,
-                variable_dict={"u10": 0, "v10": 1},
-            ),
-            "LatitudeWeightedACC": ppsci.metric.LatitudeWeightedACC(
-                num_lat=cfg.IMG_H,
-                mean=data_time_mean_normalize,
-                keep_batch=True,
-                variable_dict={"u10": 0, "v10": 1},
-            ),
+            # "LatitudeWeightedRMSE": ppsci.metric.LatitudeWeightedRMSE(
+            #     num_lat=cfg.IMG_H,
+            #     std=data_std,
+            #     keep_batch=True,
+            #     variable_dict={"u10": 0, "v10": 1},
+            # ),
+            # "LatitudeWeightedACC": ppsci.metric.LatitudeWeightedACC(
+            #     num_lat=cfg.IMG_H,
+            #     mean=data_time_mean_normalize,
+            #     keep_batch=True,
+            #     variable_dict={"u10": 0, "v10": 1},
+            # ),
         },
         name="Sup_Validator",
     )
     validator = {sup_validator.name: sup_validator}
 
     # set model
-    model = ppsci.arch.AFNONet(**cfg.MODEL.afno)
+    model = ppsci.arch.Preformer(**cfg.MODEL.afno)
 
     # init optimizer and lr scheduler
     lr_scheduler_cfg = dict(cfg.TRAIN.lr_scheduler)
@@ -187,10 +174,10 @@ def evaluate(cfg: DictConfig):
     # initialize logger
     logger.init_logger("ppsci", osp.join(cfg.output_dir, "eval.log"), "info")
 
-    data_mean, data_std = fourcast_utils.get_mean_std(
+    data_mean, data_std = utils.get_mean_std(
         cfg.DATA_MEAN_PATH, cfg.DATA_STD_PATH, cfg.VARS_CHANNEL
     )
-    data_time_mean = fourcast_utils.get_time_mean(
+    data_time_mean = utils.get_time_mean(
         cfg.DATA_TIME_MEAN_PATH, cfg.IMG_H, cfg.IMG_W, cfg.VARS_CHANNEL
     )
     data_time_mean_normalize = np.expand_dims(
@@ -206,7 +193,7 @@ def evaluate(cfg: DictConfig):
     # set eval dataloader config
     eval_dataloader_cfg = {
         "dataset": {
-            "name": "ERA5SQDataset",
+            "name": "ERA5Dataset",
             "file_path": cfg.VALID_FILE_PATH,
             "input_keys": cfg.MODEL.afno.input_keys,
             "label_keys": cfg.MODEL.afno.output_keys,
@@ -225,28 +212,28 @@ def evaluate(cfg: DictConfig):
     # set validator
     sup_validator = ppsci.validate.SupervisedValidator(
         eval_dataloader_cfg,
-        ppsci.loss.L2RelLoss(),
+        ppsci.loss.MSELoss(),
         metric={
             "MAE": ppsci.metric.MAE(keep_batch=True),
-            "LatitudeWeightedRMSE": ppsci.metric.LatitudeWeightedRMSE(
-                num_lat=cfg.IMG_H,
-                std=data_std,
-                keep_batch=True,
-                variable_dict={"u10": 0, "v10": 1},
-            ),
-            "LatitudeWeightedACC": ppsci.metric.LatitudeWeightedACC(
-                num_lat=cfg.IMG_H,
-                mean=data_time_mean_normalize,
-                keep_batch=True,
-                variable_dict={"u10": 0, "v10": 1},
-            ),
+            # "LatitudeWeightedRMSE": ppsci.metric.LatitudeWeightedRMSE(
+            #     num_lat=cfg.IMG_H,
+            #     std=data_std,
+            #     keep_batch=True,
+            #     variable_dict={"u10": 0, "v10": 1},
+            # ),
+            # "LatitudeWeightedACC": ppsci.metric.LatitudeWeightedACC(
+            #     num_lat=cfg.IMG_H,
+            #     mean=data_time_mean_normalize,
+            #     keep_batch=True,
+            #     variable_dict={"u10": 0, "v10": 1},
+            # ),
         },
         name="Sup_Validator",
     )
     validator = {sup_validator.name: sup_validator}
 
     # set model
-    model = ppsci.arch.AFNONet(**cfg.MODEL.afno)
+    model = ppsci.arch.Preformer(**cfg.MODEL.afno)
 
     # initialize solver
     solver = ppsci.solver.Solver(
@@ -264,7 +251,7 @@ def evaluate(cfg: DictConfig):
 
 
 @hydra.main(
-    version_base=None, config_path="./conf", config_name="fourcastnet_pretrain.yaml"
+    version_base=None, config_path="./conf", config_name="weathernet_train.yaml"
 )
 def main(cfg: DictConfig):
     if cfg.mode == "train":
