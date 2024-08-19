@@ -14,14 +14,18 @@
 
 from __future__ import annotations
 
+import os
 import glob
 from typing import Dict
 from typing import Optional
 from typing import Tuple
-
+import datetime
+import numbers
+import random
 import h5py
 import numpy as np
 import paddle
+import xarray as xr
 from paddle import io
 from paddle import vision
 
@@ -59,86 +63,65 @@ class ERA5SQDataset(io.Dataset):
         file_path: str,
         input_keys: Tuple[str, ...],
         label_keys: Tuple[str, ...],
-        precip_file_path: Optional[str] = None,
+        size: Tuple[int, ...],
         weight_dict: Optional[Dict[str, float]] = None,
-        vars_channel: Optional[Tuple[int, ...]] = None,
-        num_label_timestamps: int = 1,
         transforms: Optional[vision.Compose] = None,
         training: bool = True,
         stride: int = 1,
-        sq_length: int = 1,
+        sq_length: int = 6,
     ):
         super().__init__()
         self.file_path = file_path
         self.input_keys = input_keys
         self.label_keys = label_keys
-        self.precip_file_path = precip_file_path
+        self.size = size
+        self.training = training
+        self.sq_length = sq_length
+        self.transforms = transforms
 
         self.weight_dict = {} if weight_dict is None else weight_dict
         if weight_dict is not None:
             self.weight_dict = {key: 1.0 for key in self.label_keys}
             self.weight_dict.update(weight_dict)
 
-        self.vars_channel = list(range(20)) if vars_channel is None else vars_channel
-        self.num_label_timestamps = num_label_timestamps
-        self.transforms = transforms
-        self.training = training
-        self.stride = stride
-        self.sq_length = sq_length
+        # load precipitation data 
+        if training:
+            # self.precipitation = xr.open_mfdataset(os.path.join(self.file_path, 'train', 'rain_2016_01.nc'), combine='by_coords')
+            self.precipitation = h5py.File(os.path.join(self.file_path, 'train', 'rain_2016_01.h5'))
+        else:
+            # self.precipitation = xr.open_mfdataset(os.path.join(self.file_path, 'val', 'rain_201*'), combine='by_coords')
+            self.precipitation = h5py.File(os.path.join(self.file_path, 'test', 'rain_2020_02.h5'))
 
-        self.files = self.read_data(file_path)
-        self.n_years = len(self.files)
-        self.num_samples_per_year = self.files[0].shape[0]
-        self.num_samples = self.n_years * self.num_samples_per_year
-        if self.precip_file_path is not None:
-            self.precip_files = self.read_data(precip_file_path, "tp")
-
-    def read_data(self, path: str, var="fields"):
-        paths = [path] if path.endswith(".h5") else glob.glob(path + "/*.h5")
-        paths.sort()
-        files = []
-        for path_ in paths:
-            _file = h5py.File(path_, "r")
-            files.append(_file[var])
-        return files
+        t_list = self.precipitation['time'][:]
+        start_time = datetime.datetime(1900,1,1,0,0,0)
+        self.time_table = []
+        for i in range(len(t_list)):
+            temp = start_time + datetime.timedelta(hours=int(t_list[i]))
+            # self.time_table.append(temp.strftime("%Y-%m-%d %H:%M:%S"))
+            self.time_table.append(temp)
 
     def __len__(self):
-        return self.num_samples // self.stride
+        return len(self.time_table) - 24
 
     def __getitem__(self, global_idx):
-        temp = []
-        pre_temp = []
-        for i in range(self.sq_length):
-            year_idx = (global_idx+i) * self.stride // self.num_samples_per_year
-            local_idx = (global_idx+i) * self.stride % self.num_samples_per_year
-            pre_year_idx = (global_idx+self.sq_length+i) * self.stride // self.num_samples_per_year
-            pre_local_idx = (global_idx+self.sq_length+i) * self.stride % self.num_samples_per_year
+        X, y = [], []
+        for m in range(self.sq_length):
+            X.append(self.load_data(global_idx+m))
+        for n in range(self.sq_length):
+            # y.append(self.load_data(global_idx+n))
+            y.append(self.precipitation['tp'][global_idx+self.sq_length+n])
+        # X = self.Normalize(X)
+        X, y = self.RandomCrop(X, y)
 
-            if self.num_label_timestamps > 1:
-                if local_idx >= self.num_samples_per_year - self.num_label_timestamps:
-                    local_idx = self.num_samples_per_year - self.num_label_timestamps - 1
-
-            input_file = self.files[year_idx]
-            label_file = (
-                self.precip_files[pre_year_idx]
-                if self.precip_file_path is not None
-                else self.files[pre_year_idx]
-                )
-            
-            input_idx, label_idx = local_idx, pre_local_idx
-            
-            temp.append(input_file[input_idx, self.vars_channel])
-            pre_temp.append(np.expand_dims(label_file[label_idx], 0))
-
-        input_item = {self.input_keys[0]: np.stack(temp, axis=0)}
-        label_item = {self.label_keys[0]: np.stack(pre_temp, axis=0)}
+        input_item = {self.input_keys[0]: np.stack(X, axis=0)}
+        label_item = {self.label_keys[0]: np.stack(y, axis=0)}
 
         weight_shape = [1] * len(next(iter(label_item.values())).shape)
         weight_item = {
             key: np.full(weight_shape, value, paddle.get_default_dtype())
             for key, value in self.weight_dict.items()
         }
-
+        
         if self.transforms is not None:
             input_item, label_item, weight_item = self.transforms(
                 input_item, label_item, weight_item
@@ -146,3 +129,44 @@ class ERA5SQDataset(io.Dataset):
 
         return input_item, label_item, weight_item
 
+    
+    def load_data(self, idxs):
+        year = str(self.time_table[idxs].timetuple().tm_year)
+        mon = str(self.time_table[idxs].timetuple().tm_mon)
+        if len(mon) == 1:
+            mon = str('0') + mon
+        day = str(self.time_table[idxs].timetuple().tm_mday)
+        if len(day) == 1:
+            day = str('0') + day
+        hour = str(self.time_table[idxs].timetuple().tm_hour)
+        if len(hour) == 1:
+            hour = str('0') + hour
+        r_data = np.load(os.path.join(self.file_path, year, 'r_' + year + mon + day + hour + '.npy'))
+        t_data = np.load(os.path.join(self.file_path, year, 't_' + year + mon + day + hour + '.npy'))
+        u_data = np.load(os.path.join(self.file_path, year, 'u_' + year + mon + day + hour + '.npy'))
+        v_data = np.load(os.path.join(self.file_path, year, 'v_' + year + mon + day + hour + '.npy'))
+
+        data = np.concatenate([r_data, t_data, u_data, v_data])
+
+        return data
+
+    def RandomCrop(self, X, y):
+        if isinstance(self.size, numbers.Number):
+            self.size = (int(self.size), int(self.size))
+        th, tw = self.size
+        h, w = y[0].shape[-2], y[0].shape[-1]
+        x1 = random.randint(0, w - tw)
+        y1 = random.randint(0, h - th)
+
+        for i in range(len(X)):
+            X[i] = self.crop(X[i], y1, x1, y1 + th, x1 + tw)
+        for i in range(len(y)):
+            y[i] = self.crop(y[i], y1, x1, y1 + th, x1 + tw)
+
+        return X, y
+
+    def crop(self, im, x_start, y_start, x_end, y_end):
+        if len(im.shape) == 3:
+            return im[:, x_start:x_end, y_start:y_end]
+        else:
+            return im[x_start:x_end, y_start:y_end]

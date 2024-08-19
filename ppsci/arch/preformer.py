@@ -240,6 +240,7 @@ class Mid_Xnet(nn.Layer):
     def forward(self, x):
         B, T, C, H, W = x.shape
         # B TC H W
+
         x = x.reshape([B, T*C, H, W])
         # B HW TC
         x = x.flatten(2).transpose(perm=[0, 2, 1])
@@ -274,38 +275,50 @@ class Decoder(nn.Layer):
 
 class Preformer(base.Arch):
     def __init__(self, 
-                 shape_in: Tuple[int, ...], 
-                 hid_S: int = 64,
-                 hid_T: int = 256,
-                 N_S: int = 4, 
-                 N_T: int = 8, 
-                 incep_ker: Tuple[int, ...] = [3, 5, 7, 11], 
-                 groups: int = 8, 
-                 num_classes: int = 5):
+                input_keys: Tuple[str, ...],
+                output_keys: Tuple[str, ...],
+                shape_in: Tuple[int, ...], 
+                hid_S: int = 64,
+                hid_T: int = 256,
+                N_S: int = 4, 
+                N_T: int = 4, 
+                incep_ker: Tuple[int, ...] = [3, 5, 7, 11], 
+                groups: int = 8, 
+                num_classes: int = 5):
         super(Preformer, self).__init__()
+        self.input_keys = input_keys
+        self.output_keys = output_keys
+
         T, C, H, W = shape_in
         self.enc = Encoder(C, hid_S, N_S)
         self.hid1 = Mid_Xnet(T * hid_S, hid_T//2, N_T, incep_ker, groups)
-        self.dec = Decoder(T * hid_S, T*num_classes, N_S)
+        self.dec = Decoder(T * hid_S, T, N_S)
     
-    def forward(self, x_raw):
-        # x_raw = torch.randn(8, 6, 12, 128, 256)
-        # x_raw = x_raw[:, :, 6:, :, :]
-        B, T, C, H, W = x_raw.shape
-        x = x_raw.reshape([B*T, C, H, W])
+    def forward(self, x):
+        if self._input_transform is not None:
+            x = self._input_transform(x)
 
+        x = self.concat_to_tensor(x, self.input_keys)
+
+        B, T, C, H, W = x.shape
+        x = x.reshape([B*T, C, H, W])
+
+        # encoded
         embed = self.enc(x)
         _, C_4, H_4, W_4 = embed[-1].shape
 
+        # translator
         z = embed[-1].reshape([B, T, C_4, H_4, W_4])
         hid = self.hid1(z)
         hid = hid.transpose(perm=[0, 2, 1]).reshape([B, -1, H_4, W_4])
-        # hid = hid.reshape(B*T, C_4, H_4, W_4)
 
-        Y = self.dec(hid, embed[0])
-        # Y = Y.reshape(B*T, 5, -1).transpose(1, 2)
-        # pre = pre.reshape(B*T, 1, -1).transpose(1, 2)
-        # Y = self.detach(Y, pre)
-        # Y = Y.transpose(1, 2).reshape(B, T, -1, H, W)
-        Y = Y.reshape([B, T, -1, H, W])
-        return Y
+        # decoded
+        y = self.dec(hid, embed[0])
+        y = y.reshape([B, T, H, W])
+
+        y = self.split_to_dict(y, self.output_keys)
+
+        if self._output_transform is not None:
+            y = self._output_transform(x, y)
+
+        return y

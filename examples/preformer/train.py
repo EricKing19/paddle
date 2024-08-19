@@ -19,7 +19,7 @@ import numpy as np
 import paddle.distributed as dist
 from omegaconf import DictConfig
 
-import examples.weather.utils as utils
+import utils as utils
 import ppsci
 from ppsci.utils import logger
 
@@ -33,29 +33,22 @@ def train(cfg: DictConfig):
     data_mean, data_std = utils.get_mean_std(
         cfg.DATA_MEAN_PATH, cfg.DATA_STD_PATH, cfg.VARS_CHANNEL
     )
-    data_time_mean = utils.get_time_mean(
-        cfg.DATA_TIME_MEAN_PATH, cfg.IMG_H, cfg.IMG_W, cfg.VARS_CHANNEL
-    )
-    data_time_mean_normalize = np.expand_dims(
-        (data_time_mean[0] - data_mean) / data_std, 0
-    )
     # set train transforms
-    transforms = [
-        {"SqueezeData": {}},
-        {"CropData": {"xmin": (0, 0), "xmax": (cfg.IMG_H, cfg.IMG_W)}},
-        {"Normalize": {"mean": data_mean, "std": data_std}},
-    ]
+    # transforms = [
+    #     {"SqueezeData": {}},
+    #     {"CropData": {"xmin": (0, 0), "xmax": (cfg.IMG_H, cfg.IMG_W)}},
+    #     {"Normalize": {"mean": data_mean, "std": data_std}},
+    # ]
 
     # set train dataloader config
     if not cfg.USE_SAMPLED_DATA:
         train_dataloader_cfg = {
             "dataset": {
-                "name": "ERA5Dataset",
+                "name": "ERA5SQDataset",
                 "file_path": cfg.TRAIN_FILE_PATH,
                 "input_keys": cfg.MODEL.afno.input_keys,
                 "label_keys": cfg.MODEL.afno.output_keys,
-                "vars_channel": cfg.VARS_CHANNEL,
-                "transforms": transforms,
+                "size": (cfg.IMG_H, cfg.IMG_W)
             },
             "sampler": {
                 "name": "BatchSampler",
@@ -63,7 +56,7 @@ def train(cfg: DictConfig):
                 "shuffle": True,
             },
             "batch_size": cfg.TRAIN.batch_size,
-            "num_workers": 8,
+            "num_workers": 1,
         }
     else:
         NUM_GPUS_PER_NODE = 8
@@ -82,7 +75,7 @@ def train(cfg: DictConfig):
                 "rank": dist.get_rank() % NUM_GPUS_PER_NODE,
             },
             "batch_size": cfg.TRAIN.batch_size,
-            "num_workers": 8,
+            "num_workers": 1,
         }
     # set constraint
     sup_constraint = ppsci.constraint.SupervisedConstraint(
@@ -98,13 +91,12 @@ def train(cfg: DictConfig):
     # set eval dataloader config
     eval_dataloader_cfg = {
         "dataset": {
-            "name": "ERA5Dataset",
+            "name": "ERA5SQDataset",
             "file_path": cfg.VALID_FILE_PATH,
             "input_keys": cfg.MODEL.afno.input_keys,
             "label_keys": cfg.MODEL.afno.output_keys,
-            "vars_channel": cfg.VARS_CHANNEL,
-            "transforms": transforms,
             "training": False,
+            "size": (cfg.IMG_H, cfg.IMG_W)
         },
         "sampler": {
             "name": "BatchSampler",
@@ -180,26 +172,16 @@ def evaluate(cfg: DictConfig):
     data_time_mean = utils.get_time_mean(
         cfg.DATA_TIME_MEAN_PATH, cfg.IMG_H, cfg.IMG_W, cfg.VARS_CHANNEL
     )
-    data_time_mean_normalize = np.expand_dims(
-        (data_time_mean[0] - data_mean) / data_std, 0
-    )
-    # set train transforms
-    transforms = [
-        {"SqueezeData": {}},
-        {"CropData": {"xmin": (0, 0), "xmax": (cfg.IMG_H, cfg.IMG_W)}},
-        {"Normalize": {"mean": data_mean, "std": data_std}},
-    ]
 
     # set eval dataloader config
     eval_dataloader_cfg = {
         "dataset": {
-            "name": "ERA5Dataset",
+            "name": "ERA5SQDataset",
             "file_path": cfg.VALID_FILE_PATH,
             "input_keys": cfg.MODEL.afno.input_keys,
             "label_keys": cfg.MODEL.afno.output_keys,
-            "vars_channel": cfg.VARS_CHANNEL,
-            "transforms": transforms,
             "training": False,
+            "size": (cfg.IMG_H, cfg.IMG_W)
         },
         "sampler": {
             "name": "BatchSampler",
@@ -215,18 +197,6 @@ def evaluate(cfg: DictConfig):
         ppsci.loss.MSELoss(),
         metric={
             "MAE": ppsci.metric.MAE(keep_batch=True),
-            # "LatitudeWeightedRMSE": ppsci.metric.LatitudeWeightedRMSE(
-            #     num_lat=cfg.IMG_H,
-            #     std=data_std,
-            #     keep_batch=True,
-            #     variable_dict={"u10": 0, "v10": 1},
-            # ),
-            # "LatitudeWeightedACC": ppsci.metric.LatitudeWeightedACC(
-            #     num_lat=cfg.IMG_H,
-            #     mean=data_time_mean_normalize,
-            #     keep_batch=True,
-            #     variable_dict={"u10": 0, "v10": 1},
-            # ),
         },
         name="Sup_Validator",
     )
@@ -251,7 +221,7 @@ def evaluate(cfg: DictConfig):
 
 
 @hydra.main(
-    version_base=None, config_path="./conf", config_name="weathernet_train.yaml"
+    version_base=None, config_path="./conf", config_name="train.yaml"
 )
 def main(cfg: DictConfig):
     if cfg.mode == "train":
